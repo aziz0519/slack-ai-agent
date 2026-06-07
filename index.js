@@ -3,7 +3,7 @@ import pkg from '@slack/bolt';
 const { App } = pkg;
 import { WebClient } from '@slack/web-api';
 import { ChatOpenAI } from '@langchain/openai';
-import { ChatPromptTemplate } from '@langchain/prompts';
+import { ChatPromptTemplate } from '@langchain/core/prompts';
 import express from 'express';
 import dotenv from 'dotenv';
 import axios from 'axios';
@@ -19,7 +19,7 @@ const log = {
     debug: (msg, ...args) => console.debug(`[DEBUG] ${msg}`, ...args),
 }
 
-class SlackAgent {
+class SlackAIAgent {
     constructor() {
         this.app = express()
         this.slack = new App({
@@ -74,7 +74,7 @@ class SlackAgent {
             res.json({ status: 'healthy', timestamp: new Date().toISOString() });
         })
 
-        if (process.env.NODE_ENV === 'developement') {
+        if (process.env.NODE_ENV === 'development') {
             this.app.post('/test/analyze-member', async (req, res) => {
                 try {
                     const { memberInfo } = req.body;
@@ -124,6 +124,8 @@ class SlackAgent {
             if (analysisId) {
                 await markAsSentToSlack(analysisId);
             }
+
+            return analysis;
         } catch (error) {
             log.error(`Error processing ${memberInfo.name}:`, error.message);
             if (analysisId) {
@@ -218,7 +220,7 @@ class SlackAgent {
 
         try {
             const researchSummary = researchData.length > 0 
-                ? researchData.map(r => `${r.title}: ${r.content}`).join(`\\n`)
+                ? researchData.map(r => `${r.title}: ${r.content}`).join(`\n`)
                 : 'Limited research data available.';
 
             const chain = prompt.pipe(this.openai);
@@ -251,13 +253,68 @@ class SlackAgent {
         }
     }
 
+    async postAnalysisToChannel(member, analysis, researchData) {
+        const color = analysis.fitScore >= 80 ? '#36a64f'
+            : analysis.fitScore >= 60 ? '#ffb84d'
+            : analysis.fitScore >= 40 ? '#ff9500' : '#ff4444';
+
+        const blocks = [
+            {
+                type: 'header',
+                text: { type: 'plain_text', text: `New Member: ${member.name}` }
+            },
+            {
+                type: 'section',
+                fields: [
+                    { type: 'mrkdwn', text: `*Fit Score:*\n${analysis.fitScore}` },
+                    { type: 'mrkdwn', text: `*Email:* ${member.email || 'Not Provided'}` },
+                    { type: 'mrkdwn', text: `*Title:* ${member.title || 'Not Provided'}` }
+                ]
+            }
+        ];
+        if (analysis.insights.length > 0) {
+            blocks.push({
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: `*Insights:*\n${analysis.insights.map(i => `• ${i}`).join('\n')}`
+                }
+            })
+        }
+        if (analysis.recommendations.length > 0) {
+            blocks.push({
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: `*Recommendations:*\n${analysis.recommendations.map(r => `• ${r}`).join('\n')}`
+                }
+            });
+        }
+        blocks.push({
+            type: 'context',
+            elements: [
+                {
+                    color: color,
+                    blocks: blocks
+                }
+            ]
+        });
+        log.info(`Analysis posted to channel for ${member.name}`);
+    }
+
+    isPersonalEmail(email) {
+        const personalDomains = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com'];
+        const domain = email.split('@')[1].toLowerCase();
+        return personalDomains.includes(domain);
+    }
+
     async start() {
         try {
             log.info('Initializing database...')
             await initDatabase();
 
             const port = process.env.PORT || 3000;
-            this.server = this.app.listem(port, () => {
+            this.server = this.app.listen(port, () => {
                 log.info(`Express server running on port ${port}`);
             })
 
@@ -294,7 +351,7 @@ class SlackAgent {
 
 const agent = new SlackAIAgent();
 
-process.on('SIGNIT', () => agent.stop());
+process.on('SIGINT', () => agent.stop());
 process.on('SIGTERM', () => agent.stop());
 
 agent.start().catch(error => {
